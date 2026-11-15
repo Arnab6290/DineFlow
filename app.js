@@ -5,8 +5,8 @@
   3) Paste your Project URL and anon/public key below.
   Never put a service_role key in browser code.
 */
-const SUPABASE_URL = "YOUR_SUPABASE_PROJECT_URL";
-const SUPABASE_ANON_KEY = "YOUR_SUPABASE_ANON_PUBLIC_KEY";
+const SUPABASE_URL = "https://xmwtryafmdxjexyptntx.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_0tWpNvbb0hCnVPT3axI6xg_t_MSqyIt";
 
 const $ = (id) => document.getElementById(id);
 let db = null;
