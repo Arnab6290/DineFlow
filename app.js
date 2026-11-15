@@ -129,6 +129,161 @@ async function refreshAll() {
   }
 }
 
+
+// ---------- CSV import / daily sales export ----------
+function parseCsv(text) {
+  const rows = [];
+  let row = [], cell = "", quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quoted) {
+      if (ch === '"' && text[i + 1] === '"') { cell += '"'; i++; }
+      else if (ch === '"') quoted = false;
+      else cell += ch;
+    } else if (ch === '"') quoted = true;
+    else if (ch === ',') { row.push(cell); cell = ""; }
+    else if (ch === '\n') { row.push(cell); rows.push(row); row = []; cell = ""; }
+    else if (ch !== '\r') cell += ch;
+  }
+  if (cell.length || row.length) { row.push(cell); rows.push(row); }
+  return rows.filter(r => r.some(v => String(v).trim() !== ""));
+}
+
+function csvCell(value) {
+  const text = String(value ?? "");
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+function downloadCsv(filename, rows) {
+  const csv = rows.map(row => row.map(csvCell).join(",")).join("\r\n");
+  const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function localDateString(date = new Date()) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+function addCsvTools() {
+  // Add CSV menu import immediately below the existing menu form.
+  const menuForm = $("menu-form");
+  if (menuForm && !$("menu-csv-tools")) {
+    const tools = document.createElement("div");
+    tools.id = "menu-csv-tools";
+    tools.style.cssText = "display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:14px 0 18px;";
+    tools.innerHTML = `
+      <label for="menu-csv-file" style="font-size:13px;font-weight:600;">Import menu from CSV</label>
+      <input id="menu-csv-file" type="file" accept=".csv,text/csv" style="max-width:260px;font-size:13px;">
+      <button id="menu-csv-import" type="button" class="close-btn">Import CSV</button>
+      <span style="font-size:12px;color:#718096;">Columns: item_name, category, price, is_available</span>`;
+    menuForm.insertAdjacentElement("afterend", tools);
+    $("menu-csv-import").addEventListener("click", importMenuCsv);
+  }
+
+  // Add date-scoped paid-sales export above the daily revenue report.
+  const dailyRevenue = $("daily-revenue");
+  if (dailyRevenue && !$("sales-csv-tools")) {
+    const tools = document.createElement("div");
+    tools.id = "sales-csv-tools";
+    tools.style.cssText = "display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:10px 0 14px;";
+    tools.innerHTML = `
+      <label for="sales-csv-date" style="font-size:13px;font-weight:600;">Sales date</label>
+      <input id="sales-csv-date" type="date" value="${localDateString()}" style="padding:8px;border:1px solid #d7e0dc;border-radius:8px;">
+      <button id="sales-csv-export" type="button" class="close-btn">Export daily sales CSV</button>`;
+    dailyRevenue.insertAdjacentElement("beforebegin", tools);
+    $("sales-csv-export").addEventListener("click", exportDailySalesCsv);
+  }
+}
+
+async function importMenuCsv() {
+  if (!ready()) return;
+  const file = $("menu-csv-file")?.files?.[0];
+  if (!file) return toast("Choose a CSV file first.");
+  try {
+    const rawRows = parseCsv((await file.text()).replace(/^\uFEFF/, ""));
+    if (rawRows.length < 2) throw new Error("CSV must contain a header row and at least one menu item.");
+    const headers = rawRows[0].map(h => h.trim().toLowerCase().replace(/[\s-]+/g, "_"));
+    const findCol = (...names) => names.map(n => headers.indexOf(n)).find(i => i >= 0);
+    const nameCol = findCol("item_name", "name", "item", "dish_name");
+    const categoryCol = findCol("category", "item_category");
+    const priceCol = findCol("price", "unit_price");
+    const availableCol = findCol("is_available", "available", "status");
+    if (nameCol === undefined || priceCol === undefined)
+      throw new Error("CSV needs at least item_name (or name) and price columns.");
+
+    const items = rawRows.slice(1).map((r, i) => {
+      const itemName = String(r[nameCol] ?? "").trim();
+      const price = Number(String(r[priceCol] ?? "").trim());
+      if (!itemName) throw new Error(`Row ${i + 2}: item name is missing.`);
+      if (!Number.isFinite(price) || price < 0) throw new Error(`Row ${i + 2}: price must be a valid non-negative number.`);
+      let isAvailable = true;
+      if (availableCol !== undefined) {
+        const status = String(r[availableCol] ?? "true").trim().toLowerCase();
+        isAvailable = !["false", "0", "no", "unavailable", "inactive"].includes(status);
+      }
+      return {
+        item_name: itemName,
+        category: categoryCol === undefined ? null : (String(r[categoryCol] ?? "").trim() || null),
+        price,
+        is_available: isAvailable
+      };
+    });
+    const { error } = await db.from("menu_items").insert(items);
+    if (error) throw error;
+    $("menu-csv-file").value = "";
+    toast(`${items.length} menu item(s) imported successfully.`);
+    await refreshAll();
+  } catch (error) {
+    showError("CSV import failed", error);
+  }
+}
+
+async function exportDailySalesCsv() {
+  if (!ready()) return;
+  const selectedDate = $("sales-csv-date")?.value;
+  if (!selectedDate) return toast("Choose a sales date first.");
+  try {
+    const start = new Date(`${selectedDate}T00:00:00`);
+    const end = new Date(start);
+    end.setDate(end.getDate() + 1);
+    const { data, error } = await db.from("bills")
+      .select("id,order_id,total_amount,closed_at,orders(table_id,restaurant_tables(table_number))")
+      .eq("bill_status", "paid")
+      .gte("closed_at", start.toISOString())
+      .lt("closed_at", end.toISOString())
+      .order("closed_at", { ascending: true });
+    if (error) throw error;
+    const rows = [["bill_id", "order_id", "table_number", "paid_at", "total_amount_inr"]];
+    (data || []).forEach(bill => {
+      rows.push([
+        bill.id,
+        bill.order_id,
+        bill.orders?.restaurant_tables?.table_number ?? "",
+        bill.closed_at ? new Date(bill.closed_at).toLocaleString("en-IN") : "",
+        Number(bill.total_amount || 0).toFixed(2)
+      ]);
+    });
+    rows.push([]);
+    rows.push(["TOTAL_DAILY_REVENUE_INR", "", "", "", (data || []).reduce((sum, bill) => sum + Number(bill.total_amount || 0), 0).toFixed(2)]);
+    downloadCsv(`DineFlow_Daily_Sales_${selectedDate}.csv`, rows);
+    toast(`${data?.length || 0} paid bill(s) exported for ${selectedDate}.`);
+  } catch (error) {
+    showError("Daily sales export failed", error);
+  }
+}
+
+addCsvTools();
+
 $("menu-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   if (!ready()) return;
