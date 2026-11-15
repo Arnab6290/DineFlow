@@ -197,7 +197,7 @@ $("today-label").textContent = new Date().toLocaleDateString("en-IN", {
   weekday: "short", day: "numeric", month: "short", year: "numeric"
 });
 
-if (SUPABASE_URL.startsWith("https://") && SUPABASE_ANON_KEY.startsWith("ey")) {
+if (SUPABASE_URL.startsWith("https://") && (SUPABASE_ANON_KEY.startsWith("ey") || SUPABASE_ANON_KEY.startsWith("sb_publishable_"))) {
   db = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
   refreshAll();
 } else {
